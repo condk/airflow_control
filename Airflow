@@ -1,0 +1,859 @@
+// ************** IMPORT LIBRARIES **************
+
+#include "Wire.h"
+#include <DallasTemperature.h>
+#include <OneWire.h>
+
+// **************************************************
+// *                                                *
+// *              VARIABLE DESCRIPTION              *
+// *                                                *
+// **************************************************
+
+// DS18B20 Temperature Sensor definition
+// Data wire is plugged into port 4 on the Arduino
+#define ONE_WIRE_BUS 4
+#define TEMPERATURE_PRECISION 9
+
+// Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
+OneWire oneWire(ONE_WIRE_BUS);
+
+// Pass our oneWire reference to Dallas Temperature.
+DallasTemperature sensors(&oneWire);
+
+// arrays to hold device addresses
+DeviceAddress sensor_Tint, sensor_Text;
+
+// RTC Definition
+byte rtc_address=0x68;
+
+uint8_t dateTime[7];
+
+uint8_t nowSec;
+uint8_t nowMin;
+uint8_t nowHour;
+uint8_t nowDay;
+uint8_t nowMonth;
+uint8_t nowYear;
+uint8_t nowDow; //day of week
+
+uint8_t lastDay;
+
+#define DS3231_dateTime_Register 0
+
+// TEMPERATURE VARIABLES
+float tempCext;
+float tempCint;
+float last_tempCext;
+float last_tempCint;
+
+// TEMPERATURE CONSTANTS
+const float tempext_min=    -40; // °C
+const float tempext_max=    80;  // °C
+const float tempint_min=    -40; // °C
+const float tempint_max=    80;  // °C
+const float temprate_max=   20;  // °C
+
+// GPIO Input PIN definition
+int GPIO_auto_button=    2;
+int GPIO_man_button=     3;
+
+// GPIO Output PIN definition
+int GPIO_LED_auto=       13;
+int GPIO_LED_man=        12;
+int GPIO_LED_error=      9;
+int GPIO_LED_state=      8;
+int GPIO_buzzer=         10;
+int GPIO_pump=           7;
+
+// TIMING PARAMETER - buttons LED buzzer Pump
+int button_debounce=                40; // ms
+int button_timeout=                 3000; // ms
+int button_longpresstime=           500; // ms
+int led_blinktime=                  700; // ms
+int buzzertime1=                    80; // ms buzzer info beep
+int buzzertime2=                    300; // ms buzzer error beep
+unsigned long man_pumptime_max=     10000; // ms
+unsigned long auto_pumptime_max=    20000; // ms
+
+// TIMING PARAMETER - Sampletime
+unsigned long sampletime_mode_control=       200; // ms
+unsigned long sampletime_LED_control=        100; // ms
+unsigned long sampletime_buzzer_control=     100; // ms
+unsigned long sampletime_algo_control=       200; // ms
+unsigned long sampletime_pumptime_control=   500; // ms
+unsigned long sampletime_sys_state_control=  500; // ms
+unsigned long sampletime_time_control=       1000; // ms (=5 min)
+unsigned long sampletime_update_temp=        1000; // ms
+
+// TIMING VARIABLES - interrupt
+volatile unsigned long interrupttime;
+volatile unsigned long last_interrupttime;
+
+// TIMING VARIABLES - buttons
+volatile unsigned long auto_button_starttime;
+volatile unsigned long auto_button_stoptime;
+volatile unsigned long man_button_starttime;
+volatile unsigned long man_button_stoptime;
+
+// TIMING VARIABLES - Sampletime
+unsigned long runtime_mode_control;
+unsigned long laststart_mode_control;
+
+unsigned long runtime_LED_control;
+unsigned long laststart_LED_control;
+
+unsigned long runtime_buzzer_control;
+unsigned long laststart_buzzer_control;
+
+unsigned long runtime_algo_control;
+unsigned long laststart_algo_control;
+
+unsigned long runtime_pumptime_control;
+unsigned long laststart_pumptime_control;
+
+unsigned long runtime_sys_state_control;
+unsigned long laststart_sys_state_control;
+
+unsigned long runtime_time_control;
+unsigned long laststart_time_control;
+
+unsigned long runtime_update_temp;
+unsigned long laststart_update_temp;
+
+// TIMING VARIABLES - buzzer
+unsigned long starttime_buzzer;
+
+// TIMING VARIABLES - LED
+unsigned long blink_changetime_stateLED=    0;
+unsigned long blink_changetime_errorLED=    0;
+unsigned long blink_changetime_buttonLED=   0;
+
+// TIMING VARIABLES - PUMP
+unsigned long starttime_pump;
+unsigned long pumptime;
+int autodaypump_counter=     0;
+int starttime_autopump_Hour;
+int starttime_autopump_Min;
+int starttime_autopump_Sec;
+int starttime_manpump_Hour;
+int starttime_manpump_Min;
+int starttime_manpump_Sec;
+int maxautopumptime_hour=   0;
+int maxautopumptime_min=    0;
+int maxautopumptime_sec=    13;
+int maxmanpumptime_hour=    0;
+int maxmanpumptime_min=     0;
+int maxmanpumptime_sec=     23;
+bool autopump_timelimit;
+bool manpump_timelimit;
+
+
+// MODE CONSTANTS - SYSTEM
+const int init0=         0;
+const int auto1=         10;
+const int auto2=         11;
+const int man1=          20;
+const int man2=          21;
+const int safe1=         man2; // safe mode for state_error
+
+// STATE CONSTANTS
+const int state_normal=    1;
+const int state_warning=   4;
+const int state_error=     2;
+const int state_OFF=       0;
+const int state_ON=        3;
+
+// FLAG CONSTANTS
+const int event_no=     0;
+const int event_info=   1;
+const int event_error=  2;
+
+// ERROR CONSTANTS
+const int warnings_max=3;
+
+// STATE VARIABLES
+int stateLED_state=      state_OFF;
+int errorLED_state=      state_OFF;
+int buttonLED_state=     state_OFF;
+int pump_state=          state_OFF;
+int sys_state=           state_normal;
+int last_sys_state=      sys_state;
+int temp_state=          state_normal;
+int rtc_state=           state_normal;
+
+// ERROR COUNTER VARIABLES
+int rtc_error_counter;
+int temp_error_counter;
+
+// MODE VARIABLES
+int sys_mode=            init0;
+int last_sys_mode=       sys_mode;
+
+// EVENT FLAGS
+int sys_event=           event_no;
+int buzzer_event=        event_no;
+int auto_button_event=   event_no;
+int man_button_event=    event_no;
+
+// temp
+int GPIO_error= 5;
+
+
+// **************************************************
+// *                                                *
+// *                     SETUP                      *
+// *                                                *
+// **************************************************
+
+
+void setup() {
+  // setup GPIO Input
+  pinMode (GPIO_auto_button, INPUT_PULLUP);
+  pinMode (GPIO_man_button, INPUT_PULLUP);
+  pinMode (GPIO_error, INPUT); // temp
+
+  // set GPIO Output
+  pinMode(GPIO_LED_auto, OUTPUT);
+  pinMode(GPIO_LED_man, OUTPUT);
+  pinMode(GPIO_LED_error, OUTPUT);
+  pinMode(GPIO_LED_state, OUTPUT);
+  pinMode(GPIO_buzzer, OUTPUT);
+  pinMode(GPIO_pump, OUTPUT);
+
+  // configure interrupts
+  attachInterrupt(digitalPinToInterrupt(GPIO_auto_button), auto_button_isr, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(GPIO_man_button), man_button_isr, CHANGE);
+
+  // start I2C
+  Wire.begin();
+
+  // Start up the temperature sensor library
+  sensors.begin();
+
+  // locate Temperature sensor devices on the bus
+  sensors.getDeviceCount();
+
+  // set temp sensor state to error if sensor not available
+  if (!sensors.getAddress(sensor_Tint, 0)){
+      temp_state=state_error;
+  }
+  if (!sensors.getAddress(sensor_Text, 1)){
+        temp_state=state_error;
+    }
+  Serial.begin(4800);
+
+}
+
+
+// **************************************************
+// *                                                *
+// *                     MAIN                       *
+// *                                                *
+// **************************************************
+
+
+void loop() {
+  // check for change request of sys_mode
+  sampletime_control(mode_control, &laststart_mode_control, &runtime_mode_control, sampletime_mode_control);
+  // control LED blinking
+  sampletime_control(LED_control, &laststart_LED_control, &runtime_LED_control, sampletime_LED_control);
+  // control buzzer
+  sampletime_control(buzzer_control, &laststart_buzzer_control, &runtime_buzzer_control, sampletime_buzzer_control);
+  // control algorithm
+  sampletime_control(algo_control, &laststart_algo_control, &runtime_algo_control, sampletime_algo_control);
+  // control pumptime
+  sampletime_control(pumptime_control, &laststart_pumptime_control, &runtime_pumptime_control, sampletime_pumptime_control);
+  // control errors
+  sampletime_control(sys_state_control, &laststart_sys_state_control, &runtime_sys_state_control, sampletime_sys_state_control);
+  // control RTC
+  sampletime_control(time_control, &laststart_time_control, &runtime_time_control, sampletime_time_control);
+  // update temp
+  sampletime_control(update_temp, &laststart_update_temp, &runtime_update_temp, sampletime_update_temp);
+  // temp
+  check_error();
+}
+
+
+// ************** INTERRUPT SERVICE ROUTINE **************
+
+
+void auto_button_isr() {
+  // interrupt service routine for pressed auto button
+  // time to stabalize voltage at pin
+  delayMicroseconds(2000);
+  // time for button debounce
+  interrupttime=millis();
+  // set button event flag
+  auto_button_event=event_info;
+  if ((interrupttime-last_interrupttime)>button_debounce){
+    if (digitalRead(GPIO_auto_button)==LOW){
+       auto_button_starttime=millis();
+    }
+    else {
+       auto_button_stoptime=millis();
+    }
+  }
+  last_interrupttime=interrupttime;
+}
+
+void man_button_isr() {
+  // interrupt service routine for pressed manual button
+  // time to stabalize voltage at pin
+  delayMicroseconds(2000);
+  // time for button debounce
+  interrupttime=millis();
+  // set button event flag
+  man_button_event=event_info;
+  if ((interrupttime-last_interrupttime)>button_debounce){
+    if (digitalRead(GPIO_man_button)==LOW){
+       man_button_starttime=millis();
+    }
+    else {
+       man_button_stoptime=millis();
+    }
+  }
+  last_interrupttime=interrupttime;
+}
+
+
+// ************** SAMPLETIME CONTROL **************
+
+
+void sampletime_control (void (*func)(), unsigned long *laststart, unsigned long *runtime, unsigned long sampletime){
+  // this function controls the sampletime, how often the function in the first argument is called
+  // runtime defines time which has passed since the function has been called
+  *runtime=millis()-*laststart;
+  // after intervalls of the sampletime, the runtime is reset and the function is called
+  if (*runtime>sampletime){
+    // reset of last function start time
+    *laststart=millis();
+    // function is executed
+    func();
+ }}
+
+
+// ************** MODE CONTROL FUNCTIONS **************
+
+
+void mode_control () {
+  // if sys_state is state_error, only safe_mode is available
+  if (sys_state==state_normal) {
+      // check the buttons for new events
+      get_button(&man_button_event, man_button_starttime, man_button_stoptime, man1, man2);
+      get_button(&auto_button_event, auto_button_starttime, auto_button_stoptime, auto1, auto2);
+    }
+  else {
+      // if auto mode and error, go to safe mode
+      if (sys_mode!=man1 && sys_mode!=man2){
+    set_mode(safe1);
+      }
+      // only allow manual mode
+      // check man button for new event
+      get_button (&man_button_event, man_button_starttime, man_button_stoptime, man1, man2);
+  }
+}
+
+void get_button (int *button_event, unsigned long starttime, unsigned long stoptime, int mode_1, int mode_2) {
+  // check for button events and get new_sys_mode according to input
+  if (*button_event==event_info){
+    // check if button has been released
+    if (stoptime>starttime){
+      unsigned long presstime=stoptime-starttime;
+      // set sys_mode for short presstime
+      if (presstime<button_longpresstime){
+    set_mode(mode_1);}
+      // set sys_mode for long presstime and ignore press after timeout
+      if (presstime>button_longpresstime && presstime<button_timeout){
+    set_mode(mode_2);}
+      // reset button event
+      *button_event=event_no;
+    }
+  }
+}
+
+void set_mode(int mode){
+  // update last_sys_mode for recovery after error
+  last_sys_mode=sys_mode;
+  // change sys_mode if new mode is different from last sys_mode
+  if (sys_mode!=mode){
+    // set sys and buzzer_event
+    sys_event=event_info;
+    // only set buzzer_event info if no error triggered the change in sys_mode
+    if (buzzer_event!=event_error){
+      buzzer_event=event_info;
+    }
+    // change sys_mode and change algo accordingly
+    sys_mode=mode;
+    algo_control();
+  }
+}
+
+void algo_control(){
+      // selects control algorithms according to sys_mode
+      switch (sys_mode) {
+  case man1:
+    man1_control_algo();
+    break;
+
+  case man2:
+    man2_control_algo();
+    break;
+
+  case auto1:
+    auto1_control_algo();
+    break;
+
+  case auto2:
+    auto2_control_algo();
+    break;
+      }
+}
+
+
+// ************************ CONTROL ALGORITHMS ************************
+
+
+void man1_control_algo(){
+  // reset day pump counter
+  autodaypump_counter=0;
+  if (pump_state==state_OFF){
+      // if pump is off and sys_mode goes to man1, turn on pump
+      pump_on();
+      // set starttime
+      setTimeEvent(&starttime_manpump_Hour, &starttime_manpump_Min, &starttime_manpump_Sec);
+      // reset sys_event
+      sys_event=event_no;
+  }
+  if (pump_state==state_ON && manpump_timelimit){
+      // if pump is on and timer runs out, go to man2 mode (state_OFF)
+      set_mode(man2);
+  }
+}
+
+void man2_control_algo(){
+  if (pump_state==state_ON){
+      // sys_mode man2 turns pump off
+      pump_off();
+      // reset sys_event
+      sys_event=event_no;
+  }
+}
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////HERE
+void auto1_control_algo(){
+  // this function controls the pump based only on time
+  if (pump_state==state_OFF && autodaypump_counter==0){
+      pump_on();
+      autodaypump_counter++;
+      setTimeEvent(&starttime_autopump_Hour, &starttime_autopump_Min, &starttime_autopump_Sec);
+  }
+  if (pump_state==state_ON && autopump_timelimit){
+        // if pump is on and timer runs out, turn off pump
+        pump_off();
+  }
+}
+
+void auto2_control_algo(){
+  // this function controls the pump based on temp and hum. information
+  if (tempCint>25 && tempCext<tempCint){
+      pump_on();
+  }
+  else pump_off();
+  // CODE HERE!!!
+
+}
+
+
+// ************** LED AND BUZZER CONTROL FUNCTIONS **************
+
+
+void LED_control(){
+  // define error LED
+  switch (sys_state){
+    case state_normal:
+      digitalWrite(GPIO_LED_error, LOW);
+      break;
+    case state_error:
+      LED_blink(GPIO_LED_error, &errorLED_state, &blink_changetime_errorLED);
+      break;
+  }
+  // define button LEDs and status LED
+  switch (sys_mode){
+    case init0:
+      digitalWrite(GPIO_LED_auto, LOW);
+      digitalWrite(GPIO_LED_man, LOW);
+      LED_blink(GPIO_LED_state, &stateLED_state, &blink_changetime_stateLED);
+      break;
+
+    case man1:
+      digitalWrite(GPIO_LED_auto, LOW);
+      digitalWrite(GPIO_LED_man, HIGH);
+      digitalWrite(GPIO_LED_state, HIGH);
+      break;
+
+    case man2:
+      digitalWrite(GPIO_LED_auto, LOW);
+      LED_blink(GPIO_LED_man, &buttonLED_state, &blink_changetime_buttonLED);
+      digitalWrite(GPIO_LED_state, HIGH);
+      break;
+
+    case auto1:
+      digitalWrite(GPIO_LED_man, LOW);
+      digitalWrite(GPIO_LED_auto, HIGH);
+      digitalWrite(GPIO_LED_state, HIGH);
+      break;
+
+    case auto2:
+      digitalWrite(GPIO_LED_man, LOW);
+      LED_blink(GPIO_LED_auto, &buttonLED_state, &blink_changetime_buttonLED);
+      digitalWrite(GPIO_LED_state, HIGH);
+      break;
+    }
+  }
+
+void LED_blink(int pin, int *LED_state, unsigned long *blink_changetime){
+  // if LED is off and it has bin off longer than blinktime, turn it on
+  if (*LED_state==state_OFF && (millis()-*blink_changetime)>led_blinktime){
+        digitalWrite(pin, HIGH);
+        *LED_state=state_ON;
+        *blink_changetime=millis();
+  }
+  // if LED is on and time is longer than blinktime, turn it off
+  if (*LED_state==state_ON && (millis()-*blink_changetime)>led_blinktime){
+        digitalWrite(pin, LOW);
+        *LED_state=state_OFF;
+        *blink_changetime=millis();
+  }
+}
+
+void buzzer_control(){
+  if (buzzer_event==event_info) {
+    buzzer(buzzertime1);
+  }
+  if (buzzer_event==event_error) {
+    buzzer(buzzertime2);
+  }
+}
+
+void buzzer(int buzztime){
+  if (digitalRead(GPIO_buzzer)==LOW){
+    digitalWrite(GPIO_buzzer, HIGH);
+    starttime_buzzer=millis();
+  }
+  if ((millis()-starttime_buzzer)>buzztime) {
+    digitalWrite(GPIO_buzzer, LOW);
+    // reset buzzer_event
+    buzzer_event=event_no;
+  }
+}
+
+
+// ************************ PUMP FUNCTIONS ************************
+
+
+void pump_on(){
+  // turns on pump and sets state to state_ON
+  digitalWrite(GPIO_pump, HIGH);
+//  starttime_pump=millis();  // RTC code missing
+  pump_state=state_ON;
+  // Reset timelimits
+  autopump_timelimit=false;
+  manpump_timelimit=false;
+}
+
+void pump_off(){
+  // turns off pump and sets state to state_OFF
+  digitalWrite(GPIO_pump, LOW);
+  pump_state=state_OFF;
+  // reset pumptime
+  pumptime=0;
+}
+
+void pumptime_control(){
+  // timer which counts the time when the pump is on
+  if (pump_state==state_ON){
+      autopump_timelimit=checkTimeLimit(starttime_autopump_Hour, starttime_autopump_Min, starttime_autopump_Sec, maxautopumptime_hour, maxautopumptime_min, maxautopumptime_sec);
+      manpump_timelimit=checkTimeLimit(starttime_manpump_Hour, starttime_manpump_Min, starttime_manpump_Sec, maxmanpumptime_hour, maxmanpumptime_min, maxmanpumptime_sec);
+    //      pumptime=millis()-starttime_pump;  // RTC code missing
+  }
+}
+
+
+// ************************ TEMPERATURE FUNCTIONS ************************
+
+
+void update_temp(){
+  // get data from all temperature sensors and update temp variables
+  sensors.requestTemperatures();
+  tempCint=sensors.getTempC(sensor_Tint);
+  tempCext=sensors.getTempC(sensor_Text);
+
+  // verify the temp data
+  bool stateint=verify_data(tempCint, last_tempCint, temprate_max, tempint_min, tempint_max);
+  bool stateext=verify_data(tempCext, last_tempCext, temprate_max, tempext_min, tempext_max);
+
+  // if data is valid save it to last temp data and reset temp error counter
+  // if data not valid increase temp error counter and use last valid temp data
+  if(stateint && stateext){
+      last_tempCint=tempCint;
+      last_tempCext=tempCext;
+      reset_error_counter(&temp_error_counter);
+      }
+  if(!stateint || !stateext){
+      increase_error_counter(&temp_error_counter);
+      tempCint=last_tempCint;
+      tempCext=last_tempCext;
+      }
+}
+
+
+// ************************ ERROR HANDLER ************************
+
+
+void sys_state_control(){
+  // update all states
+  state_control(&temp_state, temp_error_counter);
+  state_control(&rtc_state, rtc_error_counter);
+
+  // check for any state_error which requires sys_state change
+  if (temp_state==state_error || rtc_state==state_error){
+      // if the last sys_state was not error set the sys_state to error
+      if (last_sys_state!=state_error){
+    // save last sys_mode to memory
+    last_sys_mode=sys_mode;
+    // set sys_error
+    sys_state=state_error;
+    // signalize error by buzzer
+    buzzer_event=event_error;
+      }
+  }
+  // if no state_error set sys_state back to normal
+  if (temp_state!=state_error && rtc_state!=state_error){
+      // if the last sys_state was not normal set the sys_state to normal
+      if (last_sys_state!=state_normal){
+    sys_state=state_normal;
+    // set sys_mode back to last_sys_mode before error occured
+    set_mode(last_sys_mode);
+      }
+  }
+  // update the last sys_state for next check loop
+  last_sys_state=sys_state;
+}
+
+
+void state_control(int *state, int error_counter){
+  // if state is not state_error an error leads to a state_warning
+  if (*state!=state_error){
+      // if error_counter is > 0 and < warnings_max go to state_warning
+      if (error_counter>0 && error_counter<warnings_max){
+    // go to state_warning
+    *state=state_warning;
+      }
+      // if error_counter is > warnings_max go to state_error
+      if (error_counter>=warnings_max){
+    // go to state_error
+    *state=state_error;
+      }
+  }
+  // if state is in state_error, the counter must go to 0 before state_normal
+  if (*state==state_error){
+      if (error_counter<=0){
+    // go to state_normal
+    *state=state_normal;
+      }
+  }
+}
+
+
+void increase_error_counter(int *error_counter){
+  // error counter can be between 0 and warning_max
+  if (*error_counter<warnings_max){
+      *error_counter+=1;
+  }
+  if (*error_counter>warnings_max){
+      *error_counter=warnings_max;
+  }
+}
+
+void reset_error_counter(int *error_counter){
+  // error counter will be reset to 0 if !=0
+  if (*error_counter!=0){
+      *error_counter=0;
+  }
+}
+
+// debug only
+void check_error(){
+  int pinstate=digitalRead(GPIO_error);
+  if (pinstate==1){
+      temp_state=state_error;
+  }
+}
+
+// this function varifies the data and returns true for valid data and false for invalid data
+bool verify_data(float data, float lastdata, float limit_rate, float limit_min, float limit_max){
+  float datarate=abs(lastdata-data);
+  return datarate<limit_rate && data>limit_min && data<limit_max;
+}
+
+
+// ************************ RTC Control ************************
+
+
+void time_control(){
+  if (rtcReady()){
+      rtc_state=state_normal;
+      // get date and time from rtc
+      nowDateTime();
+      // if a new day starts, reset all day counters
+      if (lastDay!=nowDay){
+    autodaypump_counter=0;
+      }
+  }
+  else{
+      rtc_state=state_error;
+  }
+  lastDay=nowDay;
+}
+
+bool rtcReady(){
+  // DS3231 available?
+  Wire.beginTransmission(rtc_address);
+  if (Wire.endTransmission()== 0) return true;
+  else return false;
+}
+
+void nowDateTime(){
+  // get date and time
+  byte x;
+  Wire.beginTransmission(rtc_address);
+  Wire.write(DS3231_dateTime_Register);
+  Wire.endTransmission();
+
+  Wire.requestFrom(int(rtc_address), 7);
+  while (Wire.available() == 0);
+  for (byte i = 0; i < 7; i++)
+  {
+    x = Wire.read();
+    dateTime[i] = bcd2Dec(x);
+  }
+
+  nowSec = dateTime[0];
+  nowMin = dateTime[1];
+  nowHour = dateTime[2];
+  nowDow = dateTime[3]; //Day of week
+  nowDay = dateTime[4];
+  nowMonth = dateTime[5];
+  nowYear = dateTime[6];
+
+}
+
+void setTimeEvent(int *eventhour, int *eventmin, int *eventsec){
+  // this function saves the current  hour, min, sec to the given variables
+  *eventhour=nowHour;
+  *eventmin=nowMin;
+  *eventsec=nowSec;
+}
+
+bool checkTimeLimit(int eventhour, int eventmin, int eventsec, int limithour, int limitmin, int limitsec){
+  // this function calculates the passed time between the current time and 
+  // the given last TimeEvent. 
+  // it compares the passed time with the max allowed time limit and 
+  // returns true if timelimit is reached and false if limit is not reached
+  int hours;
+  int mins;
+  int secs;
+  
+  if (nowHour<eventhour){
+      hours=nowHour+24-eventhour;
+  }
+  if (nowHour>=eventhour){
+      hours=nowHour-eventhour;
+  }
+  if (nowMin<eventmin){
+      mins=nowMin+60-eventmin;
+  }
+  if (nowMin>=eventmin){
+      mins=nowMin-eventmin;
+  }
+  if (nowSec<eventsec){
+      secs=nowSec+60-eventsec;
+  }
+  if (nowSec>=eventsec){
+      secs=nowSec-eventsec;
+  }
+  Serial.println(hours);
+  Serial.println(mins);
+  Serial.println(secs);
+  // check for reached limit
+  if (hours>=limithour){
+      if (mins>=limitmin){
+    if (secs>=limitsec){
+        return true;
+        
+    }
+      }
+      
+  }
+  else return false;
+}
+
+// ************************ SET TIME RTC ************************
+
+void setTime(byte h, byte m, byte s)
+{
+  byte _h = h;
+  byte _m = m;
+  byte _s = s;
+
+  byte time[3];
+
+  time[0] = dec2Bcd(_s);
+  time[1] = dec2Bcd(_m);
+  time[2] = dec2Bcd(_h);
+
+  Wire.beginTransmission(rtc_address);
+  Wire.write(DS3231_dateTime_Register);
+  for (byte i = 0; i < 3; i++)
+  {
+    Wire.write(time[i]);
+  }
+  Wire.endTransmission();
+}
+
+// ************************ DATATYPE CONVERSION FOR RTC ************************
+
+uint8_t dec2Bcd(uint8_t val){
+  // Umwandlung Dezimal zu BCD
+  uint8_t _val = val;
+  return ((_val / 10 * 16) + (_val % 10));
+}
+
+uint8_t bcd2Dec(uint8_t val){
+  // Umwandlung BCD zu Dezimal
+  uint8_t _val = val;
+  return ((_val / 16 * 10) + (_val % 16));
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// LOP
+
+// times for startand stop time from rtc
+// time handler for error to switch to millis()
+// error log for testing
+// sleep
+// watchdog
