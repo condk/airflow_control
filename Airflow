@@ -52,7 +52,7 @@ const float tempext_min=    -40; // °C
 const float tempext_max=    80;  // °C
 const float tempint_min=    -40; // °C
 const float tempint_max=    80;  // °C
-const float temprate_max=   20;  // °C
+const float temprate_max=   10;  // °C
 
 // GPIO Input PIN definition
 int GPIO_auto_button=    2;
@@ -73,18 +73,16 @@ int button_longpresstime=           500; // ms
 int led_blinktime=                  700; // ms
 int buzzertime1=                    80; // ms buzzer info beep
 int buzzertime2=                    300; // ms buzzer error beep
-unsigned long man_pumptime_max=     10000; // ms
-unsigned long auto_pumptime_max=    20000; // ms
 
-// TIMING PARAMETER - Sampletime
-unsigned long sampletime_mode_control=       200; // ms
-unsigned long sampletime_LED_control=        100; // ms
-unsigned long sampletime_buzzer_control=     100; // ms
-unsigned long sampletime_algo_control=       200; // ms
-unsigned long sampletime_pumptime_control=   500; // ms
-unsigned long sampletime_sys_state_control=  500; // ms
-unsigned long sampletime_time_control=       1000; // ms (=5 min)
-unsigned long sampletime_update_temp=        1000; // ms
+// TIMING PARAMETER - looptime
+unsigned long looptime_mode_control=       200; // ms
+unsigned long looptime_LED_control=        100; // ms
+unsigned long looptime_buzzer_control=     100; // ms
+unsigned long looptime_algo_control=       200; // ms
+unsigned long looptime_pumptime_control=   500; // ms
+unsigned long looptime_sys_state_control=  500; // ms
+unsigned long looptime_time_control=       1000; // ms (must be shorter than max pumptime
+unsigned long looptime_update_temp=        1000; // ms
 
 // TIMING VARIABLES - interrupt
 volatile unsigned long interrupttime;
@@ -96,29 +94,23 @@ volatile unsigned long auto_button_stoptime;
 volatile unsigned long man_button_starttime;
 volatile unsigned long man_button_stoptime;
 
-// TIMING VARIABLES - Sampletime
+// TIMING VARIABLES - looptime
 unsigned long runtime_mode_control;
-unsigned long laststart_mode_control;
-
 unsigned long runtime_LED_control;
-unsigned long laststart_LED_control;
-
 unsigned long runtime_buzzer_control;
-unsigned long laststart_buzzer_control;
-
 unsigned long runtime_algo_control;
-unsigned long laststart_algo_control;
-
 unsigned long runtime_pumptime_control;
-unsigned long laststart_pumptime_control;
-
 unsigned long runtime_sys_state_control;
-unsigned long laststart_sys_state_control;
-
 unsigned long runtime_time_control;
-unsigned long laststart_time_control;
-
 unsigned long runtime_update_temp;
+
+unsigned long laststart_mode_control;
+unsigned long laststart_LED_control;
+unsigned long laststart_buzzer_control;
+unsigned long laststart_algo_control;
+unsigned long laststart_pumptime_control;
+unsigned long laststart_sys_state_control;
+unsigned long laststart_time_control;
 unsigned long laststart_update_temp;
 
 // TIMING VARIABLES - buzzer
@@ -130,31 +122,42 @@ unsigned long blink_changetime_errorLED=    0;
 unsigned long blink_changetime_buttonLED=   0;
 
 // TIMING VARIABLES - PUMP
-unsigned long starttime_pump;
-unsigned long pumptime;
-int autodaypump_counter=     0;
-int starttime_autopump_Hour;
-int starttime_autopump_Min;
-int starttime_autopump_Sec;
-int starttime_manpump_Hour;
-int starttime_manpump_Min;
-int starttime_manpump_Sec;
-int maxautopumptime_hour=   0;
-int maxautopumptime_min=    0;
-int maxautopumptime_sec=    13;
-int maxmanpumptime_hour=    0;
-int maxmanpumptime_min=     0;
-int maxmanpumptime_sec=     23;
-bool autopump_timelimit;
-bool manpump_timelimit;
+int starttime_autopump_Hour= 0;
+int starttime_autopump_Min=  0;
+int starttime_autopump_Sec=  0;
 
+int starttime_manpump_Hour=  0;
+int starttime_manpump_Min=   0;
+int starttime_manpump_Sec=   0;
+
+int stoptime_autopump_Hour=  0;
+int stoptime_autopump_Min=   0;
+int stoptime_autopump_Sec=   0;
+
+int minpause_autopump_hour=  0;
+int minpause_autopump_min=   0;
+int minpause_autopump_sec=   4;
+
+int maxtime_autopump_hour=   0;
+int maxtime_autopump_min=    0;
+int maxtime_autopump_sec=    13;
+
+int maxtime_manpump_hour=    0;
+int maxtime_manpump_min=     0;
+int maxtime_manpump_sec=     23;
+
+int daycounter_autopump=     0;
+int maxdaycount_autopump=    3;
+
+bool timeout_autopump;
+bool timeout_manpump;
 
 // MODE CONSTANTS - SYSTEM
-const int init0=         0;
-const int auto1=         10;
-const int auto2=         11;
-const int man1=          20;
-const int man2=          21;
+const int init0=         0;    // mode after startup - no functionality
+const int auto1=         10;   // time control of pump by pressing button short
+const int auto2=         11;   // temp controlled pump by pressing button long
+const int man1=          20;   // man pump start by pushing button short
+const int man2=          21;   // turn off pump by pressing button long
 const int safe1=         man2; // safe mode for state_error
 
 // STATE CONSTANTS
@@ -165,7 +168,7 @@ const int state_OFF=       0;
 const int state_ON=        3;
 
 // FLAG CONSTANTS
-const int event_no=     0;
+const int event_none=   0;
 const int event_info=   1;
 const int event_error=  2;
 
@@ -191,10 +194,10 @@ int sys_mode=            init0;
 int last_sys_mode=       sys_mode;
 
 // EVENT FLAGS
-int sys_event=           event_no;
-int buzzer_event=        event_no;
-int auto_button_event=   event_no;
-int man_button_event=    event_no;
+int sys_event=           event_none;
+int buzzer_event=        event_none;
+int auto_button_event=   event_none;
+int man_button_event=    event_none;
 
 // temp
 int GPIO_error= 5;
@@ -241,6 +244,14 @@ void setup() {
   if (!sensors.getAddress(sensor_Text, 1)){
         temp_state=state_error;
     }
+  // get data from all temperature sensors and initialize temp variables
+  sensors.requestTemperatures();
+  tempCint=sensors.getTempC(sensor_Tint);
+  tempCext=sensors.getTempC(sensor_Text);
+  last_tempCint=tempCint;
+  last_tempCext=tempCext;
+
+  // Start serial communication
   Serial.begin(4800);
 
 }
@@ -255,21 +266,21 @@ void setup() {
 
 void loop() {
   // check for change request of sys_mode
-  sampletime_control(mode_control, &laststart_mode_control, &runtime_mode_control, sampletime_mode_control);
+  looptime_control(mode_control, &laststart_mode_control, &runtime_mode_control, looptime_mode_control);
   // control LED blinking
-  sampletime_control(LED_control, &laststart_LED_control, &runtime_LED_control, sampletime_LED_control);
+  looptime_control(LED_control, &laststart_LED_control, &runtime_LED_control, looptime_LED_control);
   // control buzzer
-  sampletime_control(buzzer_control, &laststart_buzzer_control, &runtime_buzzer_control, sampletime_buzzer_control);
+  looptime_control(buzzer_control, &laststart_buzzer_control, &runtime_buzzer_control, looptime_buzzer_control);
   // control algorithm
-  sampletime_control(algo_control, &laststart_algo_control, &runtime_algo_control, sampletime_algo_control);
+  looptime_control(algo_control, &laststart_algo_control, &runtime_algo_control, looptime_algo_control);
   // control pumptime
-  sampletime_control(pumptime_control, &laststart_pumptime_control, &runtime_pumptime_control, sampletime_pumptime_control);
+  looptime_control(pumptime_control, &laststart_pumptime_control, &runtime_pumptime_control, looptime_pumptime_control);
   // control errors
-  sampletime_control(sys_state_control, &laststart_sys_state_control, &runtime_sys_state_control, sampletime_sys_state_control);
+  looptime_control(sys_state_control, &laststart_sys_state_control, &runtime_sys_state_control, looptime_sys_state_control);
   // control RTC
-  sampletime_control(time_control, &laststart_time_control, &runtime_time_control, sampletime_time_control);
+  looptime_control(time_control, &laststart_time_control, &runtime_time_control, looptime_time_control);
   // update temp
-  sampletime_control(update_temp, &laststart_update_temp, &runtime_update_temp, sampletime_update_temp);
+  looptime_control(update_temp, &laststart_update_temp, &runtime_update_temp, looptime_update_temp);
   // temp
   check_error();
 }
@@ -317,15 +328,15 @@ void man_button_isr() {
 }
 
 
-// ************** SAMPLETIME CONTROL **************
+// ************** looptime CONTROL **************
 
 
-void sampletime_control (void (*func)(), unsigned long *laststart, unsigned long *runtime, unsigned long sampletime){
-  // this function controls the sampletime, how often the function in the first argument is called
+void looptime_control (void (*func)(), unsigned long *laststart, unsigned long *runtime, unsigned long looptime){
+  // this function controls the looptime, how often the function in the first argument is called
   // runtime defines time which has passed since the function has been called
   *runtime=millis()-*laststart;
-  // after intervalls of the sampletime, the runtime is reset and the function is called
-  if (*runtime>sampletime){
+  // after intervalls of the looptime, the runtime is reset and the function is called
+  if (*runtime>looptime){
     // reset of last function start time
     *laststart=millis();
     // function is executed
@@ -342,11 +353,11 @@ void mode_control () {
       // check the buttons for new events
       get_button(&man_button_event, man_button_starttime, man_button_stoptime, man1, man2);
       get_button(&auto_button_event, auto_button_starttime, auto_button_stoptime, auto1, auto2);
-    }
+  }
   else {
       // if auto mode and error, go to safe mode
       if (sys_mode!=man1 && sys_mode!=man2){
-    set_mode(safe1);
+          set_mode(safe1);
       }
       // only allow manual mode
       // check man button for new event
@@ -367,7 +378,7 @@ void get_button (int *button_event, unsigned long starttime, unsigned long stopt
       if (presstime>button_longpresstime && presstime<button_timeout){
     set_mode(mode_2);}
       // reset button event
-      *button_event=event_no;
+      *button_event=event_none;
     }
   }
 }
@@ -390,6 +401,8 @@ void set_mode(int mode){
 }
 
 void algo_control(){
+  Serial.print("sys mode: ");
+  Serial.println(sys_mode);
       // selects control algorithms according to sys_mode
       switch (sys_mode) {
   case man1:
@@ -416,49 +429,69 @@ void algo_control(){
 
 void man1_control_algo(){
   // reset day pump counter
-  autodaypump_counter=0;
+  daycounter_autopump=0;
   if (pump_state==state_OFF){
       // if pump is off and sys_mode goes to man1, turn on pump
       pump_on();
       // set starttime
       setTimeEvent(&starttime_manpump_Hour, &starttime_manpump_Min, &starttime_manpump_Sec);
       // reset sys_event
-      sys_event=event_no;
+      sys_event=event_none;
   }
-  if (pump_state==state_ON && manpump_timelimit){
+  if (pump_state==state_ON && timeout_manpump){
       // if pump is on and timer runs out, go to man2 mode (state_OFF)
       set_mode(man2);
   }
 }
 
 void man2_control_algo(){
+  // reset day pump counter
+  daycounter_autopump=0;
   if (pump_state==state_ON){
       // sys_mode man2 turns pump off
       pump_off();
       // reset sys_event
-      sys_event=event_no;
+      sys_event=event_none;
   }
 }
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////HERE
 void auto1_control_algo(){
+  Serial.print("pump_state: ");
+  Serial.println(pump_state);
+  Serial.print("daycounter_autopump: ");
+  Serial.println(daycounter_autopump);
+  Serial.print("timeout_autopump: ");
+  Serial.println(timeout_autopump);
   // this function controls the pump based only on time
-  if (pump_state==state_OFF && autodaypump_counter==0){
+  // conditions to turn on pump: pump is off + no pumps on that day + pause after last start has been reached
+  if (pump_state==state_OFF && daycounter_autopump<maxdaycount_autopump && timeout_autopump){
+      // turn on the pump
       pump_on();
-      autodaypump_counter++;
+      // increase the day pump counter
+      daycounter_autopump++;
+      // set pump starttime
       setTimeEvent(&starttime_autopump_Hour, &starttime_autopump_Min, &starttime_autopump_Sec);
   }
-  if (pump_state==state_ON && autopump_timelimit){
-        // if pump is on and timer runs out, turn off pump
+  //conditions to turn off pump: pump is on + pumptime has been reached
+  if (pump_state==state_ON && timeout_autopump){
+        // turn off pump
         pump_off();
+        // set pump stoptime
+        setTimeEvent(&stoptime_autopump_Hour, &stoptime_autopump_Min, &stoptime_autopump_Sec);
   }
 }
 
 void auto2_control_algo(){
   // this function controls the pump based on temp and hum. information
-  if (tempCint>25 && tempCext<tempCint){
+  if (pump_state==state_OFF && tempCint>25 && tempCext<tempCint && timeout_autopump){
       pump_on();
+      // set pump starttime
+      setTimeEvent(&starttime_autopump_Hour, &starttime_autopump_Min, &starttime_autopump_Sec);
   }
-  else pump_off();
+  if (pump_state==state_ON && (tempCint<25 || timeout_autopump)) {
+    pump_off();
+    setTimeEvent(&stoptime_autopump_Hour, &stoptime_autopump_Min, &stoptime_autopump_Sec);
+  }
   // CODE HERE!!!
 
 }
@@ -543,7 +576,7 @@ void buzzer(int buzztime){
   if ((millis()-starttime_buzzer)>buzztime) {
     digitalWrite(GPIO_buzzer, LOW);
     // reset buzzer_event
-    buzzer_event=event_no;
+    buzzer_event=event_none;
   }
 }
 
@@ -552,29 +585,30 @@ void buzzer(int buzztime){
 
 
 void pump_on(){
+  Serial.println("pump_on");
   // turns on pump and sets state to state_ON
   digitalWrite(GPIO_pump, HIGH);
 //  starttime_pump=millis();  // RTC code missing
   pump_state=state_ON;
-  // Reset timelimits
-  autopump_timelimit=false;
-  manpump_timelimit=false;
 }
 
 void pump_off(){
+    Serial.println("pump_off");
   // turns off pump and sets state to state_OFF
   digitalWrite(GPIO_pump, LOW);
   pump_state=state_OFF;
-  // reset pumptime
-  pumptime=0;
 }
 
 void pumptime_control(){
   // timer which counts the time when the pump is on
   if (pump_state==state_ON){
-      autopump_timelimit=checkTimeLimit(starttime_autopump_Hour, starttime_autopump_Min, starttime_autopump_Sec, maxautopumptime_hour, maxautopumptime_min, maxautopumptime_sec);
-      manpump_timelimit=checkTimeLimit(starttime_manpump_Hour, starttime_manpump_Min, starttime_manpump_Sec, maxmanpumptime_hour, maxmanpumptime_min, maxmanpumptime_sec);
-    //      pumptime=millis()-starttime_pump;  // RTC code missing
+      timeout_autopump=checkTimeLimit(starttime_autopump_Hour, starttime_autopump_Min, starttime_autopump_Sec, maxtime_autopump_hour, maxtime_autopump_min, maxtime_autopump_sec);
+      timeout_manpump=checkTimeLimit(starttime_manpump_Hour, starttime_manpump_Min, starttime_manpump_Sec, maxtime_manpump_hour, maxtime_manpump_min, maxtime_manpump_sec);
+  }
+  if (pump_state==state_OFF){
+      timeout_autopump=checkTimeLimit(stoptime_autopump_Hour, stoptime_autopump_Min, stoptime_autopump_Sec, minpause_autopump_hour, minpause_autopump_min, minpause_autopump_sec);
+      Serial.print("pump control: pump OFF + timeout (pause):");
+      Serial.println(timeout_autopump);
   }
 }
 
@@ -703,15 +737,17 @@ bool verify_data(float data, float lastdata, float limit_rate, float limit_min, 
 void time_control(){
   if (rtcReady()){
       rtc_state=state_normal;
+      reset_error_counter(&rtc_error_counter);
       // get date and time from rtc
       nowDateTime();
       // if a new day starts, reset all day counters
       if (lastDay!=nowDay){
-    autodaypump_counter=0;
+          daycounter_autopump=0;
       }
   }
   else{
       rtc_state=state_error;
+      increase_error_counter(&rtc_error_counter);
   }
   lastDay=nowDay;
 }
@@ -745,7 +781,6 @@ void nowDateTime(){
   nowDay = dateTime[4];
   nowMonth = dateTime[5];
   nowYear = dateTime[6];
-
 }
 
 void setTimeEvent(int *eventhour, int *eventmin, int *eventsec){
@@ -753,17 +788,19 @@ void setTimeEvent(int *eventhour, int *eventmin, int *eventsec){
   *eventhour=nowHour;
   *eventmin=nowMin;
   *eventsec=nowSec;
+  // reset timeouts
+  timeout_autopump=false;
+  timeout_manpump=false;
 }
 
 bool checkTimeLimit(int eventhour, int eventmin, int eventsec, int limithour, int limitmin, int limitsec){
-  // this function calculates the passed time between the current time and 
-  // the given last TimeEvent. 
-  // it compares the passed time with the max allowed time limit and 
+  // this function calculates the passed time between the current time and
+  // the given last TimeEvent.
+  // it compares the passed time with the max allowed time limit and
   // returns true if timelimit is reached and false if limit is not reached
   int hours;
   int mins;
   int secs;
-  
   if (nowHour<eventhour){
       hours=nowHour+24-eventhour;
   }
@@ -782,20 +819,17 @@ bool checkTimeLimit(int eventhour, int eventmin, int eventsec, int limithour, in
   if (nowSec>=eventsec){
       secs=nowSec-eventsec;
   }
-  Serial.println(hours);
-  Serial.println(mins);
-  Serial.println(secs);
-  // check for reached limit
+  // if limit is reached return true
   if (hours>=limithour){
       if (mins>=limitmin){
-    if (secs>=limitsec){
-        return true;
-        
-    }
+        if (secs>=limitsec){
+          return true;
+        }
       }
-      
+
   }
-  else return false;
+  // if no limit is reached return false
+  return false;
 }
 
 // ************************ SET TIME RTC ************************
@@ -851,7 +885,7 @@ uint8_t bcd2Dec(uint8_t val){
 
 
 // LOP
-
+// temp hysteresis
 // times for startand stop time from rtc
 // time handler for error to switch to millis()
 // error log for testing
